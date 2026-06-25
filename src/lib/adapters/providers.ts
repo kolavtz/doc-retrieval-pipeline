@@ -79,11 +79,18 @@ Rules:
 1. Read the text/images thoroughly. If a field is not present or cannot be inferred, set it to null. Do not hallucinate.
 2. For numeric fields (subtotal, tax, grand_total, qty, unit_price), return them as numbers, not formatted strings (e.g., return 7000.00 instead of "$7,000.00").
 3. You MUST estimate your confidence score (from 0 to 100) for each extracted field based on how clear, unambiguous, and present the field is in the text/images.
+4. You MUST classify the document and include these two fields at the root of the "extracted_data" object:
+   - "document_category": MUST be one of ["Bills", "Legal", "Operations", "Other"]
+   - "document_subcategory": A specific descriptive tag representing the subcategory (e.g. "Software Subscription", "NDA", "Board Resolution", "System Performance Report", "Personal Letter", etc.)
 
 You MUST respond ONLY with a valid JSON object matching the following envelope format, and no other text:
 {
-  "extracted_data": <The extracted JSON matching the specific schema requested below>,
-  "confidence_scores": <A flat JSON object mapping each primary extracted field name to a confidence score integer from 0 to 100. Example: {"invoice_number": 98, "vendor_name": 95}>
+  "extracted_data": {
+    "document_category": "string",
+    "document_subcategory": "string",
+    ... (the specific schema fields requested below)
+  },
+  "confidence_scores": <A flat JSON object mapping each primary extracted field name to a confidence score integer from 0 to 100. Example: {"document_category": 99, "invoice_number": 98}>
 }
 
 Schema instructions to extract:

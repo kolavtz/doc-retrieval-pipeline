@@ -1,6 +1,9 @@
 import { create } from 'zustand';
+import { encryptText, EncryptedPackage } from '../crypto/encryption';
+import { syncEncryptedFileToDrive, parseDateHierarchy } from '../gdrive/sync';
 
 export type ProviderType = 'openai' | 'anthropic' | 'google' | 'groq' | 'xai' | 'custom';
+export type DocCategory = 'Bills' | 'Legal' | 'Operations' | 'Other';
 
 export interface EndpointConfig {
   id: string;
@@ -67,6 +70,13 @@ export interface DocumentData {
   anomalies: AnomalyLog[];
   groundTruthId?: string;
   benchmarkMetrics?: BenchmarkMetrics;
+  
+  // Categorization & Google Drive sync fields
+  category?: DocCategory;
+  subcategory?: string;
+  gdriveFileId?: string;
+  gdriveSyncTime?: string;
+  gdriveSyncTrajectory?: string[];
 }
 
 export interface GroundTruthData {
@@ -83,8 +93,15 @@ interface PlatformState {
   groundTruths: GroundTruthData[];
   isDemoMode: boolean;
   
+  // Google Drive & Local Encryption State
+  gdriveToken: string | null;
+  encryptionPassphrase: string;
+  
   // Actions
   setDemoMode: (enabled: boolean) => void;
+  setGdriveToken: (token: string | null) => void;
+  setEncryptionPassphrase: (passphrase: string) => void;
+  
   addEndpoint: (endpoint: Omit<EndpointConfig, 'id'>) => string;
   updateEndpoint: (id: string, updates: Partial<EndpointConfig>) => void;
   deleteEndpoint: (id: string) => void;
@@ -99,6 +116,9 @@ interface PlatformState {
   // Extraction & Failover Run
   runExtraction: (documentId: string) => Promise<void>;
   runConsolidation: (documentIds: string[], schemaPrompt?: string) => Promise<void>;
+  
+  // GDrive Sync Action
+  syncDocumentToGDrive: (documentId: string) => Promise<void>;
   
   // Ground Truth & Benchmarking
   addGroundTruth: (documentName: string, jsonContent: Record<string, any>) => void;
@@ -200,7 +220,7 @@ Title: CEO, Acme Global                       Title: VP Operations, InnoTech
 Date: June 3, 2026                            Date: [MISSING SIGNING DATE]`;
   }
 
-  // Default generic document (A realistic business letter / statement instead of DevOps!)
+  // Default generic document
   return `FORMAL ACCOUNT COMMUNICATION
 Date: June 12, 2026
 Sender: Aether Services Team
@@ -247,11 +267,11 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
   const isContract = lowerText.includes('contract') || 
                      lowerText.includes('agreement') || 
                      lowerText.includes('nda') ||
-                     fileName.toLowerCase().includes('contract');
+                     fileName.toLowerCase().includes('contract') ||
+                     lowerText.includes('master services agreement');
 
   if (isInvoice) {
-    // 1. Grand Total extraction
-    let grandTotal = 145.00; // default generic charge fallback
+    let grandTotal = 145.00;
     const totalRegexes = [
       /(?:grand\s+)?total\s*(?:due)?\s*:?\s*\$?\s*([0-9,.]+)/i,
       /amount\s*(?:due)?\s*:?\s*\$?\s*([0-9,.]+)/i,
@@ -271,7 +291,6 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
       }
     }
 
-    // 2. Subtotal & Tax
     let subtotal = grandTotal;
     let tax = 0;
     const subtotalRegex = /subtotal\s*:?\s*\$?\s*([0-9,.]+)/i;
@@ -284,7 +303,6 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
       }
     }
 
-    // 3. Invoice Number
     let invNum = 'INV-' + Math.floor(100000 + Math.random() * 900000);
     const invRegexes = [
       /invoice\s*(?:number|num|#)\s*:?\s*(\S+)/i,
@@ -300,7 +318,6 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
       }
     }
 
-    // 4. Dates
     let invDate = 'June 15, 2026';
     const dateRegexes = [
       /date\s*:?\s*([0-9a-zA-Z\s,/-]+)/i,
@@ -315,7 +332,6 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
       }
     }
 
-    // 5. Vendor Name
     let vendorName = 'Aether Services Team';
     const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
     if (lines.length > 0) {
@@ -325,13 +341,11 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
       }
     }
     
-    // Look for sender keywords
     const senderMatch = text.match(/sender\s*:?\s*([^\n]+)/i);
     if (senderMatch && senderMatch[1]) {
       vendorName = senderMatch[1].trim();
     }
 
-    // 6. Client Name
     let clientName = 'Jane Doe';
     const clientRegex = /(?:bill|ship|invoice|recipient)\s*to\s*:?\s*([^\n]+)/i;
     const clientMatch = text.match(clientRegex);
@@ -345,7 +359,6 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
       clientName = recMatch[1].trim();
     }
 
-    // 7. Payment Terms
     let terms = 'Net 30';
     const termsMatch = text.match(/terms\s*:?\s*([^\n]+)/i);
     if (termsMatch && termsMatch[1]) {
@@ -353,6 +366,8 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
     }
 
     const data = {
+      document_category: 'Bills',
+      document_subcategory: fileName.toLowerCase().includes('subscription') || lowerText.includes('subscription') ? 'Software Subscription' : 'Professional Services',
       invoice_number: invNum,
       invoice_date: invDate,
       vendor_name: vendorName,
@@ -368,6 +383,8 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
     };
 
     const confidence = {
+      document_category: 99,
+      document_subcategory: 95,
       invoice_number: 95,
       invoice_date: 92,
       vendor_name: 88,
@@ -402,6 +419,8 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
     const hasMissingInnotech = text.includes('[MISSING SIGNING DATE]') || lowerText.includes('missing signing date');
 
     const data = {
+      document_category: 'Legal',
+      document_subcategory: lowerText.includes('nda') ? 'NDA' : 'Master Services Agreement',
       agreement_type: lowerText.includes('nda') ? 'NON-DISCLOSURE AGREEMENT' : 'MASTER SERVICES AGREEMENT',
       effective_date: effectiveDate,
       provider: party1,
@@ -412,6 +431,8 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
     };
 
     const confidence = {
+      document_category: 99,
+      document_subcategory: 95,
       agreement_type: 95,
       effective_date: 90,
       provider: 85,
@@ -424,9 +445,11 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
     return { extractedData: data, confidence };
   }
 
-  // Generic document fallback but consistent with headers
+  // Generic document fallback
   const titleLine = text.split('\n')[0] || 'Unknown Document';
   const data = {
+    document_category: 'Operations',
+    document_subcategory: lowerText.includes('performance') || lowerText.includes('benchmark') ? 'System Performance Report' : 'Developer Guide',
     document_type: 'GENERAL ARCHIVE',
     report_date: new Date().toLocaleDateString(),
     title: titleLine,
@@ -435,6 +458,8 @@ const parseOcrTextHeuristically = (text: string, fileName: string): { extractedD
   };
 
   const confidence = {
+    document_category: 90,
+    document_subcategory: 80,
     document_type: 80,
     report_date: 99,
     title: 95,
@@ -474,8 +499,17 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
     activeDocumentId: null,
     groundTruths: [],
     isDemoMode: true,
+    
+    // GDrive & Local Encrypt State
+    gdriveToken: null,
+    encryptionPassphrase: getStoredState<string>('aether_passphrase', 'secure-startup-2026'),
 
     setDemoMode: (enabled) => set({ isDemoMode: enabled }),
+    setGdriveToken: (token) => set({ gdriveToken: token }),
+    setEncryptionPassphrase: (passphrase) => {
+      setStoredState('aether_passphrase', passphrase);
+      set({ encryptionPassphrase: passphrase });
+    },
 
     addEndpoint: (endpoint) => {
       const id = 'endpoint-' + Math.random().toString(36).substring(2, 9);
@@ -745,6 +779,12 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
           }
         };
 
+        // Extract categorization fields from LLM/Simulation output
+        const category: DocCategory = (finalResult.document_category === 'Bills' || finalResult.document_category === 'Legal' || finalResult.document_category === 'Operations' || finalResult.document_category === 'Other')
+          ? finalResult.document_category
+          : 'Other';
+        const subcategory: string = finalResult.document_subcategory || 'General Correspondence';
+
         set((state) => {
           const updatedDocs = state.documents.map((d) =>
             d.id === documentId
@@ -754,6 +794,8 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
                   extractionResult,
                   anomalies,
                   error: undefined,
+                  category,
+                  subcategory,
                 }
               : d
           );
@@ -765,9 +807,9 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
         const lowerDocName = doc.name.toLowerCase();
         const lowerOcr = doc.rawOcrText.toLowerCase();
         let matchedGtId = '';
-        if (lowerDocName.includes('invoice') || lowerDocName.includes('receipt') || lowerDocName.includes('bill') || lowerDocName.includes('charge') || lowerOcr.includes('invoice') || lowerOcr.includes('billing')) {
+        if (category === 'Bills') {
           matchedGtId = 'gt-invoice';
-        } else if (lowerDocName.includes('contract') || lowerDocName.includes('agreement') || lowerDocName.includes('nda') || lowerOcr.includes('master services agreement')) {
+        } else if (category === 'Legal') {
           matchedGtId = 'gt-contract';
         }
 
@@ -823,13 +865,15 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
       await new Promise((resolve) => setTimeout(resolve, 2000));
 
       const totalInvoiceBilling = docsToMerge
-        .filter(d => d.name.toLowerCase().includes('invoice') || d.name.toLowerCase().includes('receipt') || d.name.toLowerCase().includes('bill') || d.rawOcrText.toLowerCase().includes('invoice') || d.rawOcrText.toLowerCase().includes('billing'))
+        .filter(d => d.category === 'Bills' || d.name.toLowerCase().includes('invoice') || d.name.toLowerCase().includes('receipt') || d.name.toLowerCase().includes('bill'))
         .reduce((acc, d) => {
           const amt = d.extractionResult?.extractedData?.grand_total;
           return acc + (typeof amt === 'number' ? amt : 145.00);
         }, 0);
 
       const consolidatedData = {
+        document_category: 'Operations',
+        document_subcategory: 'Consolidated Ledger Report',
         consolidation_date: new Date().toLocaleDateString(),
         source_files_count: docsToMerge.length,
         source_files: docsToMerge.map(d => ({ id: d.id, name: d.name, status: d.status })),
@@ -842,7 +886,7 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
         },
         financial_consolidation: {
           associated_invoices: docsToMerge
-            .filter(d => d.name.toLowerCase().includes('invoice') || d.name.toLowerCase().includes('receipt') || d.name.toLowerCase().includes('bill') || d.rawOcrText.toLowerCase().includes('invoice'))
+            .filter(d => d.category === 'Bills' || d.name.toLowerCase().includes('invoice'))
             .map(d => ({
               invoice_number: d.extractionResult?.extractedData?.invoice_number || "INV-882231",
               invoice_date: d.extractionResult?.extractedData?.invoice_date || "June 15, 2026",
@@ -859,6 +903,8 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
       };
 
       const confidenceScores = {
+        document_category: 100,
+        document_subcategory: 100,
         consolidation_date: 100,
         source_files_count: 100,
         source_files: 99,
@@ -873,6 +919,8 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
             ? {
                 ...d,
                 status: 'completed' as const,
+                category: 'Operations',
+                subcategory: 'Consolidated Ledger Report',
                 extractionResult: {
                   extractedData: consolidatedData,
                   confidenceScores,
@@ -896,6 +944,122 @@ export const usePlatformStore = create<PlatformState>((set, get) => {
             : d
         )
       }));
+    },
+
+    syncDocumentToGDrive: async (documentId) => {
+      const doc = get().documents.find(d => d.id === documentId);
+      if (!doc || !doc.extractionResult) return;
+
+      const category = doc.category || 'Other';
+      const extractedData = doc.extractionResult.extractedData;
+      const dateStr = extractedData.invoice_date || extractedData.statement_date || extractedData.effective_date || extractedData.report_date || '';
+      
+      const { year, month } = parseDateHierarchy(dateStr);
+
+      const trajectoryLogs: string[] = [];
+      const timestamp = new Date().toLocaleString();
+
+      try {
+        // Formulate the raw JSON audit trail content containing:
+        // - Raw OCR Ingest text
+        // - Extracted Struct JSON
+        // - Ingest Metadata (Model, Latency, Router Trajectory logs)
+        const auditPayload = JSON.stringify({
+          document_id: doc.id,
+          file_name: doc.name,
+          size_bytes: doc.size,
+          category,
+          subcategory: doc.subcategory || 'General',
+          raw_ocr_text: doc.rawOcrText,
+          extracted_metadata: extractedData,
+          confidence_scores: doc.extractionResult.confidenceScores,
+          routing_trajectory: doc.extractionResult.metadata.trajectory,
+          synced_at: timestamp
+        }, null, 2);
+
+        trajectoryLogs.push(`Acquiring local AES-GCM encryption partition passphrase...`);
+        trajectoryLogs.push(`Deriving 256-bit PBKDF2 cryptography key...`);
+        
+        // Encrypt the payload client-side!
+        const encryptedPkg = await encryptText(auditPayload, get().encryptionPassphrase);
+        const encryptedPayloadString = JSON.stringify(encryptedPkg);
+        
+        trajectoryLogs.push(`Encryption complete! AES-GCM Ciphertext generated.`);
+        
+        if (get().isDemoMode || !get().gdriveToken) {
+          // GOOGLE DRIVE SIMULATOR (for testing and demo mode!)
+          trajectoryLogs.push(`Simulator: Accessing root directory 'AetherDoc_Partition'...`);
+          await new Promise(resolve => setTimeout(resolve, 800));
+          trajectoryLogs.push(`Simulator: Checking for folder AetherDoc_Partition/Category: "${category}"...`);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          trajectoryLogs.push(`Simulator: Traversing hierarchical year subfolder: "${category}/${year}"...`);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          trajectoryLogs.push(`Simulator: Traversing chronological month sub-subfolder: "${category}/${year}/${month}"...`);
+          await new Promise(resolve => setTimeout(resolve, 600));
+          
+          const mockFileId = 'gdrive-' + Math.random().toString(36).substring(2, 9);
+          trajectoryLogs.push(`Simulator: Uploading encrypted document package "${doc.name}.enc" to GDrive Month Folder...`);
+          await new Promise(resolve => setTimeout(resolve, 1000));
+          
+          trajectoryLogs.push(`Simulator: Sync successfully written to cloud. File ID: ${mockFileId}`);
+
+          set(state => ({
+            documents: state.documents.map(d => 
+              d.id === documentId 
+                ? { 
+                    ...d, 
+                    gdriveFileId: mockFileId, 
+                    gdriveSyncTime: timestamp,
+                    gdriveSyncTrajectory: trajectoryLogs
+                  } 
+                : d
+            )
+          }));
+        } else {
+          // REAL GOOGLE DRIVE API CALLS
+          const token = get().gdriveToken!;
+          
+          set(state => ({
+            documents: state.documents.map(d => 
+              d.id === documentId 
+                ? { ...d, gdriveSyncTrajectory: [...trajectoryLogs, 'Initiating Google Drive API authentication...'] } 
+                : d
+            )
+          }));
+
+          const syncResult = await syncEncryptedFileToDrive(token, {
+            name: doc.name,
+            encryptedContent: encryptedPayloadString,
+            category,
+            date: dateStr
+          });
+
+          const finalLogs = [...trajectoryLogs, ...syncResult.trajectory];
+
+          set(state => ({
+            documents: state.documents.map(d => 
+              d.id === documentId 
+                ? { 
+                    ...d, 
+                    gdriveFileId: syncResult.fileId, 
+                    gdriveSyncTime: timestamp,
+                    gdriveSyncTrajectory: finalLogs
+                  } 
+                : d
+            )
+          }));
+        }
+      } catch (err: any) {
+        console.error('Google Drive Sync Error:', err);
+        trajectoryLogs.push(`Critical Sync Error: ${err.message || err}`);
+        set(state => ({
+          documents: state.documents.map(d => 
+            d.id === documentId 
+              ? { ...d, gdriveSyncTrajectory: trajectoryLogs } 
+              : d
+          )
+        }));
+      }
     },
 
     addGroundTruth: (documentName, jsonContent) => set((state) => {

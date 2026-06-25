@@ -8,11 +8,12 @@ import DocumentDropzone from '../components/workspace/Dropzone';
 import DocumentExtractor from '../components/workspace/Extractor';
 import AnomalyLogsPanel from '../components/dashboard/AnomalyLogs';
 import AnalyticsPanel from '../components/dashboard/Analytics';
+import AuditTrailPanel from '../components/audit/AuditTrail';
 import { Shield, LayoutDashboard, Layers, BarChart3, AlertCircle, RefreshCw, Cpu, Activity } from 'lucide-react';
 
 export default function DashboardHome() {
   const { endpoints, documents, isDemoMode, setDemoMode } = usePlatformStore();
-  const [activeTab, setActiveTab] = useState<'workspace' | 'endpoints' | 'dashboard'>('workspace');
+  const [activeTab, setActiveTab] = useState<'workspace' | 'endpoints' | 'dashboard' | 'audit'>('workspace');
   const [liveLogs, setLiveLogs] = useState<{ id: string; msg: string; type: 'info' | 'warn' | 'success' }[]>([]);
 
   // Calculate live stats
@@ -149,6 +150,18 @@ export default function DashboardHome() {
               <BarChart3 className="w-4 h-4" />
               Quality & Verification
             </button>
+
+            <button
+              onClick={() => setActiveTab('audit')}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                activeTab === 'audit'
+                  ? 'bg-slate-900 border-indigo-500/20 text-indigo-400 shadow-lg shadow-indigo-500/[0.02]'
+                  : 'bg-transparent border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/30'
+              }`}
+            >
+              <Shield className="w-4 h-4" />
+              Startup Audit Center
+            </button>
           </div>
 
           {/* Alert Logs Preview in Sidebar */}
@@ -216,6 +229,12 @@ export default function DashboardHome() {
               <div className="h-full overflow-hidden">
                 <AnalyticsPanel />
               </div>
+            </div>
+          )}
+
+          {activeTab === 'audit' && (
+            <div className="h-full overflow-hidden">
+              <AuditTrailPanel />
             </div>
           )}
 

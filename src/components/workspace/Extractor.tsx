@@ -199,13 +199,34 @@ export default function DocumentExtractor() {
 
           {/* Model details / Metadata */}
           {activeDoc.extractionResult && (
-            <div className="flex items-center justify-between text-[10px] text-slate-500 border-b border-slate-850 pb-2">
-              <span className="flex items-center gap-1">
-                Resolved Model: <span className="font-mono text-slate-300 font-semibold">{activeDoc.extractionResult.metadata.modelUsed}</span>
-              </span>
-              <span>
-                Total Latency: <span className="text-teal-400 font-bold font-mono">{activeDoc.extractionResult.metadata.latencyMs}ms</span>
-              </span>
+            <div className="flex flex-col gap-2 border-b border-slate-850 pb-2">
+              <div className="flex items-center justify-between text-[10px] text-slate-500">
+                <span className="flex items-center gap-1">
+                  Resolved Model: <span className="font-mono text-slate-300 font-semibold">{activeDoc.extractionResult.metadata.modelUsed}</span>
+                </span>
+                <span>
+                  Total Latency: <span className="text-teal-400 font-bold font-mono">{activeDoc.extractionResult.metadata.latencyMs}ms</span>
+                </span>
+              </div>
+              <div className="flex items-center gap-4 text-[10px] text-slate-400">
+                <span className="flex items-center gap-1.5">
+                  Category: 
+                  <span className={`px-2 py-0.5 rounded text-[8px] font-bold uppercase tracking-wider ${
+                    activeDoc.category === 'Bills' ? 'bg-amber-500/15 text-amber-400 border border-amber-500/20' :
+                    activeDoc.category === 'Legal' ? 'bg-indigo-500/15 text-indigo-400 border border-indigo-500/20' :
+                    activeDoc.category === 'Operations' ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/20' :
+                    'bg-slate-500/15 text-slate-400 border border-slate-500/20'
+                  }`}>
+                    {activeDoc.category || 'Other'}
+                  </span>
+                </span>
+                <span className="flex items-center gap-1.5">
+                  Subcategory: 
+                  <span className="text-slate-200 font-semibold px-2 py-0.5 bg-slate-950 rounded border border-slate-850 text-[9px]">
+                    {activeDoc.subcategory || 'General'}
+                  </span>
+                </span>
+              </div>
             </div>
           )}
 
